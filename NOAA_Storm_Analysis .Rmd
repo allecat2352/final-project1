@@ -1,0 +1,426 @@
+---
+title: "Severe Weather Events in the United States: A Public Health and Economic Impact Analysis of NOAA Storm Data (2025)"
+author: "Data Analytics Final Project"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    fig_caption: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center", fig.width = 10, fig.height = 6)
+```
+
+---
+
+# Synopsis
+
+This report analyzes the U.S. National Oceanic and Atmospheric Administration (NOAA) Storm Database for the year 2025, focusing on storm events across the United States and their consequences for public health and the economy. Three source files — event details, fatalities, and geographic locations — were joined by `EVENT_ID` to create a unified dataset of 72,241 records spanning all 50 states and territories. The analysis reveals that **Tornadoes, Heat, and Flash Floods** are the deadliest event types, while **Thunderstorm Wind, Hail, and Flash Floods** account for the greatest number of recorded incidents. Texas, Oklahoma, and Missouri are the most frequently impacted states. Storm activity peaks sharply in late spring and early summer (May–July), reflecting the United States' severe convective weather season. An additional investigation into property damage reveals that **Hurricanes, Storm Surges, and Tropical Storms** cause tremendously large economic losses despite their lower frequency. Together, these findings highlight the importance of seasonal preparedness, geographic targeting of emergency resources, and different response strategies based on event type and consequence.
+
+
+# Data Processing
+
+The data were obtained from the NOAA Storm Events Database, available at:
+[https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles/](https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles/)
+
+Three files for the year 2025 (compiled as of 2026-03-23) were used:
+
+- `StormEvents_details-ftp_v1.0_d2025_c20260323.csv` — event-level details including type, state, injuries, deaths, and property damage
+- `StormEvents_fatalities-ftp_v1.0_d2025_c20260323.csv` — individual fatality records linked by `EVENT_ID`
+- `StormEvents_locations-ftp_v1.0_d2025_c20260323.csv` — geographic coordinates linked by `EVENT_ID`
+
+All three files are joined on the `EVENT_ID` key, as documented in the [NOAA Bulk CSV Format specification](https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles/Storm-Data-Bulk-csv-Format.pdf).
+
+## Loading Libraries
+
+```{r libraries}
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(forcats)
+library(stringr)
+library(tidyr)
+library(scales)
+library(knitr)
+library(gridExtra)
+library(ggrepel)
+```
+
+## Loading and Joining the Data
+
+```{r}
+folder_path <- "~/Desktop/R"
+
+details_file    <- file.path(folder_path, "StormEvents_details-ftp_v1.0_d2025_c20260323 (1).csv")
+fatalities_file <- file.path(folder_path, "StormEvents_fatalities-ftp_v1.0_d2025_c20260323.csv")
+locations_file  <- file.path(folder_path, "StormEvents_locations-ftp_v1.0_d2025_c20260323 2.csv")
+
+details    <- read_csv(details_file,    show_col_types = FALSE)
+fatalities <- read_csv(fatalities_file, show_col_types = FALSE)
+locations  <- read_csv(locations_file,  show_col_types = FALSE)
+fatalities_summary <- fatalities %>%
+  group_by(EVENT_ID) %>%
+  summarise(
+    FAT_COUNT    = n(),
+    FAT_DIRECT   = sum(FATALITY_TYPE == "D", na.rm = TRUE),
+    FAT_INDIRECT = sum(FATALITY_TYPE == "I", na.rm = TRUE),
+    .groups = "drop"
+  )
+StormEvents_joined_data <- details %>%
+  left_join(locations,          by = "EVENT_ID") %>%
+  left_join(fatalities_summary, by = "EVENT_ID")
+
+write_csv(StormEvents_joined_data, file.path(folder_path, "StormEvents_joined_data.csv"))
+message("Joined data saved to: ", file.path(folder_path, "StormEvents_joined_data.csv"))
+
+dim(StormEvents_joined_data)
+```
+
+## Data Cleaning and Transformation
+
+1. **Property and crop damage** are stored as character strings with suffix codes (K = thousands, M = millions, B = billions). These are converted to numeric dollar values.
+2. **Total injuries and deaths** are computed by summing direct and indirect counts.
+3. **Month ordering** is enforced so monthly plots display in calendar order.
+
+```{r}
+parse_damage <- function(x) {
+  x <- as.character(x)
+  multiplier <- case_when(
+    str_detect(x, "K") ~ 1e3,
+    str_detect(x, "M") ~ 1e6,
+    str_detect(x, "B") ~ 1e9,
+    TRUE ~ 1
+  )
+  numeric_part <- as.numeric(str_remove_all(x, "[KMBkmb ]"))
+  ifelse(is.na(numeric_part), 0, numeric_part * multiplier)
+}
+storm <- details %>%
+  mutate(
+    DAMAGE_PROPERTY_NUM = parse_damage(DAMAGE_PROPERTY),
+    DAMAGE_CROPS_NUM    = parse_damage(DAMAGE_CROPS),
+    TOTAL_DAMAGE        = DAMAGE_PROPERTY_NUM + DAMAGE_CROPS_NUM,
+    TOTAL_INJURIES      = INJURIES_DIRECT + INJURIES_INDIRECT,
+    TOTAL_DEATHS        = DEATHS_DIRECT   + DEATHS_INDIRECT,
+    HEALTH_IMPACT       = TOTAL_INJURIES  + TOTAL_DEATHS,
+   
+    MONTH_NAME = factor(MONTH_NAME,
+                        levels = c("January","February","March","April",
+                                   "May","June","July","August",
+                                   "September","October","November","December"))
+  )
+
+
+glimpse(storm %>% select(EVENT_TYPE, STATE, MONTH_NAME,
+                          TOTAL_DEATHS, TOTAL_INJURIES, TOTAL_DAMAGE))
+```
+
+### Dataset Summary
+
+```{r}
+data.frame(
+  Metric = c("Total storm events (2025)",
+             "Distinct event types",
+             "States / territories covered",
+             "Total direct deaths",
+             "Total direct injuries",
+             "Total property damage (USD)",
+             "Total crop damage (USD)"),
+  Value = c(
+    format(nrow(storm), big.mark = ","),
+    n_distinct(storm$EVENT_TYPE),
+    n_distinct(storm$STATE),
+    format(sum(storm$DEATHS_DIRECT),   big.mark = ","),
+    format(sum(storm$INJURIES_DIRECT), big.mark = ","),
+    dollar(sum(storm$DAMAGE_PROPERTY_NUM)),
+    dollar(sum(storm$DAMAGE_CROPS_NUM))
+  )
+) %>%
+  kable(caption = "Table 1: Summary statistics for the 2025 NOAA Storm Events dataset")
+```
+
+# Results
+
+## Question 1 — Which Event Types Are Most Harmful to Population Health?
+
+Population health impact is measured using two complementary metrics: **total fatalities** (direct + indirect deaths) and **total injuries** (direct + indirect). Combining both into a single chart allows emergency managers to distinguish events that are lethal from those that just cause injuries, as preparedness strategies may differ.
+
+```{r fig1-health, fig.cap="**Figure 1.** Top 15 weather event types by total fatalities (left) and total injuries (right) in the United States, 2025. Events are ranked independently on each panel. Tornadoes, Heat events, and Flash Floods dominate fatalities, while Tornadoes and Thunderstorm Wind top injury counts.", fig.height=7, fig.width=12}
+
+top_deaths <- storm %>%
+  group_by(EVENT_TYPE) %>%
+  summarise(TOTAL_DEATHS = sum(TOTAL_DEATHS), .groups = "drop") %>%
+  arrange(desc(TOTAL_DEATHS)) %>%
+  slice_head(n = 15) %>%
+  mutate(EVENT_TYPE = fct_reorder(EVENT_TYPE, TOTAL_DEATHS))
+top_injuries <- storm %>%
+  group_by(EVENT_TYPE) %>%
+  summarise(TOTAL_INJURIES = sum(TOTAL_INJURIES), .groups = "drop") %>%
+  arrange(desc(TOTAL_INJURIES)) %>%
+  slice_head(n = 15) %>%
+  mutate(EVENT_TYPE = fct_reorder(EVENT_TYPE, TOTAL_INJURIES))
+
+p_deaths <- ggplot(top_deaths, aes(x = TOTAL_DEATHS, y = EVENT_TYPE)) +
+  geom_col(fill = "#C0392B", alpha = 0.85) +
+  geom_text(aes(label = TOTAL_DEATHS), hjust = -0.1, size = 3.2, color = "grey20") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Fatalities by Event Type",
+       x = "Total Deaths", y = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+        panel.grid.major.y = element_blank())
+
+p_injuries <- ggplot(top_injuries, aes(x = TOTAL_INJURIES, y = EVENT_TYPE)) +
+  geom_col(fill = "#E67E22", alpha = 0.85) +
+  geom_text(aes(label = TOTAL_INJURIES), hjust = -0.1, size = 3.2, color = "grey20") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Injuries by Event Type",
+       x = "Total Injuries", y = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5),
+        panel.grid.major.y = element_blank())
+grid.arrange(p_deaths, p_injuries, ncol = 2)
+```
+
+```{r}
+storm %>%
+  group_by(EVENT_TYPE) %>%
+  summarise(
+    Deaths   = sum(TOTAL_DEATHS),
+    Injuries = sum(TOTAL_INJURIES),
+    .groups = "drop"
+  ) %>%
+  mutate(`Health Impact Score` = Deaths + Injuries) %>%
+  arrange(desc(`Health Impact Score`)) %>%
+  slice_head(n = 10) %>%
+  kable(caption = "Table 2: Top 10 event types by combined health impact (deaths + injuries), 2025",
+        format.args = list(big.mark = ","))
+```
+
+**Key findings:** Tornadoes, Heat events, and Flash Floods are the three deadliest weather event types in 2025. Tornadoes also lead injury counts, followed by Thunderstorm Wind and Lightning. Heat events cause a disproportionately high number of deaths relative to injuries, indicating that heat-related mortality often occurs without prior medical treatment.
+---
+
+## Question 2 — Which Event Types Most Commonly Occur in Which States?
+
+This question asks where storm activity is most concentrated geographically. The heatmap below shows the **count of storm events** for the top 15 most-active states and the top 15 most-frequent event types.
+
+```{r fig2-state, fig.cap="**Figure 2.** Heatmap of storm event frequency for the top 15 most active states and top 15 most common event types in 2025. Darker cells indicate more recorded events. Thunderstorm Wind dominates across many central and southern states, while Drought is especially prevalent in Texas and drought-prone plains states.", fig.height=8, fig.width=12}
+top_states <- storm %>%
+  count(STATE, sort = TRUE) %>%
+  slice_head(n = 15) %>%
+  pull(STATE)
+
+top_events <- storm %>%
+  count(EVENT_TYPE, sort = TRUE) %>%
+  slice_head(n = 15) %>%
+  pull(EVENT_TYPE)
+
+heatmap_data <- storm %>%
+  filter(STATE %in% top_states, EVENT_TYPE %in% top_events) %>%
+  count(STATE, EVENT_TYPE) %>%
+  mutate(
+    STATE      = factor(STATE,      levels = rev(top_states)),
+    EVENT_TYPE = factor(EVENT_TYPE, levels = top_events)
+  )
+
+ggplot(heatmap_data, aes(x = EVENT_TYPE, y = STATE, fill = n)) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  geom_text(aes(label = ifelse(n >= 50, comma(n), "")),
+            size = 2.6, color = "white", fontface = "bold") +
+  scale_fill_gradient(low = "#D6EAF8", high = "#1A5276",
+                      name = "Event Count", labels = comma) +
+  scale_x_discrete(guide = guide_axis(angle = 40)) +
+  labs(
+    title    = "Storm Event Frequency by State and Event Type (Top 15 Each), 2025",
+    subtitle = "Cell labels shown for counts ≥ 50",
+    x = "Event Type", y = "State"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title    = element_text(face = "bold"),
+    plot.subtitle = element_text(color = "grey40"),
+    legend.position = "right"
+  )
+```
+
+```{r}
+storm %>%
+  filter(STATE %in% top_states) %>%
+  count(STATE, sort = TRUE) %>%
+  rename(`Total Events` = n) %>%
+  kable(caption = "Table 3: Total storm events in the 15 most active states, 2025",
+        format.args = list(big.mark = ","))
+```
+
+**Key findings:** Texas records the highest number of storm events of any state, driven heavily by Thunderstorm Wind and Hail — consistent with its large geographic region and position in Tornado Alley and the Gulf Coast. Oklahoma, Missouri, Illinois, and Virginia round out the top five most active states. Drought events cluster prominently in Texas and the southern plains, reflecting the arid conditions.
+
+---
+
+## Question 3 — Which Event Types Are Characterized by Which Months?
+
+Understanding the seasonal pattern of storm events helps emergency planners anticipate demand spikes for personnel, equipment, and shelter.
+
+```{r fig3-monthly, fig.cap="**Figure 3.** Monthly storm event counts for the eight most frequent weather event types in 2025 (faceted). The convective season (May–July) is dominated by Thunderstorm Wind, Hail, and Flash Floods. Winter Weather peaks in January–March, while Heat is concentrated in July–August. Drought shows a relatively flat year-round distribution.", fig.height=9, fig.width=12}
+
+top8_events <- storm %>%
+  count(EVENT_TYPE, sort = TRUE) %>%
+  slice_head(n = 8) %>%
+  pull(EVENT_TYPE)
+
+monthly_data <- storm %>%
+  filter(EVENT_TYPE %in% top8_events) %>%
+  count(EVENT_TYPE, MONTH_NAME) %>%
+  tidyr::complete(EVENT_TYPE, MONTH_NAME, fill = list(n = 0))
+
+ggplot(monthly_data, aes(x = MONTH_NAME, y = n, fill = EVENT_TYPE)) +
+  geom_col(show.legend = FALSE, alpha = 0.85) +
+  scale_y_continuous(labels = comma) +
+  scale_x_discrete(guide = guide_axis(angle = 45)) +
+  facet_wrap(~ EVENT_TYPE, scales = "free_y", ncol = 2) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title    = "Monthly Distribution of Top 8 Storm Event Types, 2025",
+    subtitle = "Y-axis scales are free across facets to emphasize within-type seasonal patterns",
+    x = NULL, y = "Number of Events"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title    = element_text(face = "bold"),
+    plot.subtitle = element_text(color = "grey40"),
+    strip.text    = element_text(face = "bold")
+  )
+```
+
+**Key findings:** The severe convective weather season (May–July) accounts for the largest share of Thunderstorm Wind, Hail, and Flash Flood events. Winter Weather events are most frequent from January through March and again in November–December. Heat events spike sharply in July–August. Drought events are broadly distributed across the year but are more prevalent in the early months, consistent with multi-month climatological patterns that precede summer stress.
+
+---
+
+## Question 4 — Which Event Types Cause the Greatest Economic Damage?
+
+Beyond human health, severe weather imposes enormous economic costs on communities. This analysis examines total combined property and crop damage by event type, which is a critical metric for economic planners.
+
+```{r fig4-damage, fig.cap="**Figure 4.** Total economic damage (property + crop, in millions USD) for the top 15 most costly weather event types in 2025. Hurricanes and Storm Surges cause disproportionate economic damage relative to their frequency, while high-frequency events such as Hail and Thunderstorm Wind also accumulate substantial aggregate losses.", fig.height=7, fig.width=10}
+
+top_damage <- storm %>%
+  group_by(EVENT_TYPE) %>%
+  summarise(TOTAL_DAMAGE = sum(TOTAL_DAMAGE), .groups = "drop") %>%
+  filter(TOTAL_DAMAGE > 0) %>%
+  arrange(desc(TOTAL_DAMAGE)) %>%
+  slice_head(n = 15) %>%
+  mutate(
+    EVENT_TYPE  = fct_reorder(EVENT_TYPE, TOTAL_DAMAGE),
+    DAMAGE_M    = TOTAL_DAMAGE / 1e6   # convert to millions for readability
+  )
+
+ggplot(top_damage, aes(x = DAMAGE_M, y = EVENT_TYPE)) +
+  geom_col(fill = "#1F618D", alpha = 0.85) +
+  geom_text(aes(label = paste0("$", round(DAMAGE_M, 1), "M")),
+            hjust = -0.05, size = 3.2, color = "grey20") +
+  scale_x_continuous(labels = dollar_format(suffix = "M"),
+                     expand = expansion(mult = c(0, 0.2))) +
+  labs(
+    title    = "Top 15 Weather Events by Total Economic Damage, 2025",
+    subtitle = "Combined property and crop damage; amounts in millions USD",
+    x = "Total Damage (USD Millions)", y = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title    = element_text(face = "bold"),
+    plot.subtitle = element_text(color = "grey40"),
+    panel.grid.major.y = element_blank()
+  )
+```
+
+```{r}
+storm %>%
+  group_by(EVENT_TYPE) %>%
+  summarise(
+    `Events`          = n(),
+    `Property Damage` = dollar(sum(DAMAGE_PROPERTY_NUM)),
+    `Crop Damage`     = dollar(sum(DAMAGE_CROPS_NUM)),
+    `Total Damage`    = dollar(sum(TOTAL_DAMAGE)),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(as.numeric(gsub("[^0-9.]", "", `Total Damage`)))) %>%
+  slice_head(n = 10) %>%
+  kable(caption = "Table 4: Top 10 event types by total economic damage (property + crops), 2025")
+```
+
+**Key findings:** Hurricanes and Storm Surges generate by far the largest single-event economic losses despite occurring relatively rarely. This low-frequency, high-consequence profile means that per-event economic damage is much severe for tropical systems than for the more numerous Thunderstorm Wind or Hail events. However, the sheer volume of Hail and Thunderstorm Wind events means they also accumulate substantial aggregate losses over the course of a year. Drought causes significant crop damage concentrated in agricultural states.
+
+---
+
+## Summary Figure — Health vs. Economic Damage Trade-off
+
+The following scatter plot integrates Questions 1 and 4 by plotting event types on two axes simultaneously: average deaths per event (y-axis, health risk) and total economic damage (x-axis, economic risk). 
+
+```{r fig5-quadrant, fig.cap="**Figure 5.** Dual-risk scatter plot of the top 25 weather event types in 2025. The x-axis shows total economic damage (log scale) and the y-axis shows average deaths per event. Bubble size encodes total event count. Events in the upper-right quadrant (high damage AND high lethality) represent the most severe combined risk and warrant the highest levels of preparedness investment.", fig.height=7, fig.width=11}
+
+risk_data <- storm %>%
+  group_by(EVENT_TYPE) %>%
+  summarise(
+    n_events      = n(),
+    total_deaths  = sum(TOTAL_DEATHS),
+    avg_deaths    = mean(TOTAL_DEATHS),
+    total_damage  = sum(TOTAL_DAMAGE),
+    .groups = "drop"
+  ) %>%
+  filter(n_events >= 20, total_damage > 0) %>%
+  arrange(desc(total_damage + total_deaths * 1e5)) %>%
+  slice_head(n = 25)
+
+ggplot(risk_data,
+       aes(x = total_damage / 1e6, y = avg_deaths,
+           size = n_events, color = avg_deaths, label = EVENT_TYPE)) +
+  geom_point(alpha = 0.75) +
+  geom_text_repel(size = 2.8, max.overlaps = 25,
+                            segment.color = "grey60",
+                            box.padding = 0.4) +
+  scale_x_log10(labels = dollar_format(suffix = "M"),
+                breaks = 10^(0:6)) +
+  scale_size_continuous(name = "Event Count", range = c(2, 14),
+                        labels = comma) +
+  scale_color_gradient(low = "#F9E79F", high = "#C0392B",
+                       name = "Avg Deaths\nper Event") +
+  labs(
+    title    = "Weather Event Risk Profile: Health Lethality vs. Economic Damage",
+    subtitle = "Top 25 event types (≥ 20 events) · Bubble size = total event count · X-axis log scale",
+    x = "Total Economic Damage (USD Millions, log scale)",
+    y = "Average Deaths per Event"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title    = element_text(face = "bold"),
+    plot.subtitle = element_text(color = "grey40"),
+    legend.position = "right"
+  )
+```
+
+**Key findings:** This dual-risk view reveals that Hurricanes occupy a high-damage, moderate lethal rate, while Heat events show high average in lethal rate with comparatively lower total economic damage. Flash Floods sit at a dangerous intersection of a moderate lethal rate and moderate-to-high economic damage. Tornadoes cluster in the upper-middle range, with notable deaths per event and substantial economic impact. Events toward the lower-left (low damage, low deaths) such as Dust Devils or Funnel Clouds represent nuisance-level hazards requiring different resource allocations.
+
+---
+
+# Conclusion
+
+This analysis of 72,241 storm events recorded in the NOAA Storm Database for 2025 yields four principal findings:
+
+1. **Health impact:** Tornadoes, Heat, and Flash Floods are the deadliest event types. Tornadoes also cause the most injuries. Heat is uniquely lethal relative to its injury burden, suggesting a need for targeted heat prevention programs.
+
+2. **Geographic distribution:** Texas, Oklahoma, and Missouri bear the heaviest storm event loads, driven by Thunderstorm Wind and Hail. Coastal states face disproportionate risk from low-frequency, high-consequence tropical events.
+
+3. **Seasonality:** The May–July convective season concentrates the greatest event volume. Winter Weather peaks January–March. Heat crises concentrate in July–August. These patterns provide a roadmap for seasonal staffing.
+
+4. **Economic damage:** Hurricanes and Storm Surges generate catastrophic per-event economic losses far exceeding their frequency. However, high-volume events (Hail, Thunderstorm Wind) accumulate large aggregate losses that cannot be ignored in annual budget planning.
+
+Taken together, these findings provide a data-driven foundation for prioritizing emergency management investments,and  public awareness campaigns throughout the United States.
+
+---
+
+
